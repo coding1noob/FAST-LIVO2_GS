@@ -99,6 +99,8 @@ public:
   vector<float> patch_buffer;
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
   bool ncc_en = false, colmap_output_en = false;
+  int colmap_save_interval = 1;
+  int colmap_wait_num = 0;
 
   int width, height, grid_n_width, grid_n_height, length;
   double image_resize_factor;

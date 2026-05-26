@@ -144,6 +144,7 @@ void LIVMapper::initializeComponents()
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
+  vio_manager->colmap_save_interval = img_save_interval;
   vio_manager->initializeVIO();
 
   p_imu->set_extrinsic(extT, extR);
@@ -1200,6 +1201,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
   std::stringstream ss_time;
   ss_time << std::fixed << std::setprecision(6) << update_time;
 
+  // =================== Log/pcd 的 .pcd 保存导出 ===================
   if (pcd_save_en)
   {
     static int scan_wait_num = 0;
@@ -1231,12 +1233,9 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
           scan_wait_num++;
           cout << "save body frame points: " << pcl_wait_save_intensity->points.size() << endl;
         }
-        pcd_save_interval = 1;
-        
         break;
 
       default:
-        pcd_save_interval = 1;
         scan_wait_num++;
         break;
     }
@@ -1257,17 +1256,19 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
         pcd_writer.writeBinary(all_points_dir, *pcl_wait_save_intensity);
         PointCloudXYZI().swap(*pcl_wait_save_intensity);
       }
+      if(LidarMeasures.lio_vio_flg == LIO || LidarMeasures.lio_vio_flg == LO)
+      {
+        Eigen::Quaterniond q(_state.rot_end);
+        fout_lidar_pos << std::fixed << std::setprecision(6);
+        fout_lidar_pos <<  LidarMeasures.measures.back().lio_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " " << q.x() << " " << q.y() << " " << q.z()
+            << " " << q.w() << " " << endl;
+      }
       scan_wait_num = 0;
     }
-    
-    if(LidarMeasures.lio_vio_flg == LIO || LidarMeasures.lio_vio_flg == LO)
-    {
-      Eigen::Quaterniond q(_state.rot_end);
-      fout_lidar_pos << std::fixed << std::setprecision(6);
-      fout_lidar_pos <<  LidarMeasures.measures.back().lio_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " " << q.x() << " " << q.y() << " " << q.z()
-          << " " << q.w() << " " << endl;
-    }
   }
+  // ====================================== 
+  
+  // =================== Log/image 的图片保存导出 ===================
   if (img_save_en && LidarMeasures.lio_vio_flg == VIO)
   {
     static int img_wait_num = 0;
@@ -1284,6 +1285,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
       img_wait_num = 0;
     }
   }
+  // ======================================
 
   if(laserCloudWorldRGB->size() > 0)  PointCloudXYZI().swap(*pcl_wait_pub); 
   if(LidarMeasures.lio_vio_flg == VIO)  PointCloudXYZI().swap(*pcl_w_wait_pub);

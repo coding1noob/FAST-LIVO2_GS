@@ -125,6 +125,7 @@ void VIOManager::initializeVIO()
     // cv::waitKey(1);
   }
 
+  // ============ Log/Colmap/sparse/0/images.txt、cameras.txt 初始化 ============
   if(colmap_output_en)
   {
     pinhole_cam = dynamic_cast<vk::PinholeCamera*>(cam);
@@ -141,6 +142,8 @@ void VIOManager::initializeVIO()
         << cx << " " << cy << std::endl;
     fout_camera.close();
   }
+  // ======================================
+
   grid_num.resize(length);
   map_index.resize(length);
   map_dist.resize(length);
@@ -1759,6 +1762,7 @@ V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
   return pixel;
 }
 
+// =================== Log/Colmap/images 的图片保存导出 ===================
 void VIOManager::dumpDataForColmap()
 {
   static int cnt = 1;
@@ -1782,6 +1786,7 @@ void VIOManager::dumpDataForColmap()
   fout_colmap << "0.0 0.0 -1" << std::endl;
   cnt++;
 }
+// ======================================
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
@@ -1828,8 +1833,16 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   updateReferencePatch(feat_map);
 
   double t7 = omp_get_wtime();
-  
-  if(colmap_output_en)  dumpDataForColmap();
+
+  if (colmap_output_en)
+  {
+    colmap_wait_num++;
+    if (colmap_save_interval > 0 && colmap_wait_num >= colmap_save_interval)
+    {
+      dumpDataForColmap();
+      colmap_wait_num = 0;
+    }
+  }
 
   frame_count++;
   ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - t1 - (t5 - t4)) / frame_count;
