@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <filesystem>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -39,6 +40,11 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   voxelmap_manager.reset(new VoxelMapManager(voxel_config, voxel_map));
   vio_manager.reset(new VIOManager());
   root_dir = ROOT_DIR;
+  std::error_code output_error;
+  std::filesystem::create_directories(pcd_output_dir, output_error);
+  if (output_error) throw std::runtime_error("Cannot create PCD output directory: " + pcd_output_dir);
+  std::filesystem::create_directories(image_output_dir, output_error);
+  if (output_error) throw std::runtime_error("Cannot create image output directory: " + image_output_dir);
   initializeFiles();
   initializeComponents();
   path.header.stamp = ros::Time::now();
@@ -55,6 +61,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("common/img_en", img_en, 1);
   nh.param<int>("common/lidar_en", lidar_en, 1);
   nh.param<string>("common/img_topic", img_topic, "/left_camera/image");
+  nh.param<string>("output/pcd_dir", pcd_output_dir, string(ROOT_DIR) + "Log/pcd");
+  nh.param<string>("output/image_dir", image_output_dir, string(ROOT_DIR) + "Log/image");
 
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
@@ -78,6 +86,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
 
   nh.param<string>("evo/seq_name", seq_name, "01");
   nh.param<bool>("evo/pose_output_en", pose_output_en, false);
+  nh.param<bool>("output/pcd_pose_output_en", pcd_pose_output_en, true);
+  nh.param<bool>("output/image_pose_output_en", image_pose_output_en, false);
   nh.param<double>("imu/gyr_cov", gyr_cov, 1.0);
   nh.param<double>("imu/acc_cov", acc_cov, 1.0);
   nh.param<int>("imu/imu_int_frame", imu_int_frame, 3);
@@ -184,8 +194,8 @@ void LIVMapper::initializeFiles()
       }
   }
   if(colmap_output_en) fout_points.open(std::string(ROOT_DIR) + "Log/Colmap/sparse/0/points3D.txt", std::ios::out);
-  if(pcd_save_en) fout_lidar_pos.open(std::string(ROOT_DIR) + "Log/pcd/lidar_poses.txt", std::ios::out);
-  if(img_save_en) fout_visual_pos.open(std::string(ROOT_DIR) + "Log/image/image_poses.txt", std::ios::out);
+  if (pcd_save_en && pcd_pose_output_en) fout_lidar_pos.open(pcd_output_dir + "/lidar_poses.txt", std::ios::out);
+  if (img_save_en && image_pose_output_en) fout_visual_pos.open(image_output_dir + "/image_poses.txt", std::ios::out);
   fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
   fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
 }
@@ -1241,7 +1251,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
     }
     if ((pcl_wait_save->size() > 0 || pcl_wait_save_intensity->size() > 0) && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval)
     {
-      string all_points_dir(string(string(ROOT_DIR) + "Log/pcd/") + ss_time.str() + string(".pcd"));
+      string all_points_dir(pcd_output_dir + "/" + ss_time.str() + string(".pcd"));
 
       pcl::PCDWriter pcd_writer;
 
@@ -1256,12 +1266,13 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
         pcd_writer.writeBinary(all_points_dir, *pcl_wait_save_intensity);
         PointCloudXYZI().swap(*pcl_wait_save_intensity);
       }
-      if(LidarMeasures.lio_vio_flg == LIO || LidarMeasures.lio_vio_flg == LO)
+      if (pcd_pose_output_en && fout_lidar_pos.is_open() &&
+          (LidarMeasures.lio_vio_flg == LIO || LidarMeasures.lio_vio_flg == LO))
       {
         Eigen::Quaterniond q(_state.rot_end);
         fout_lidar_pos << std::fixed << std::setprecision(6);
         fout_lidar_pos <<  LidarMeasures.measures.back().lio_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " " << q.x() << " " << q.y() << " " << q.z()
-            << " " << q.w() << " " << endl;
+              << " " << q.w() << " " << endl;
       }
       scan_wait_num = 0;
     }
@@ -1276,12 +1287,15 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
 
     if (img_save_interval > 0 && img_wait_num >= img_save_interval)
     {
-      imwrite(string(string(ROOT_DIR) + "Log/image/") + ss_time.str() + string(".png"), vio_manager->img_rgb);
-      
-      Eigen::Quaterniond q(_state.rot_end);
-      fout_visual_pos << std::fixed << std::setprecision(6);
-      fout_visual_pos << LidarMeasures.measures.back().vio_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
-            << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+      imwrite(image_output_dir + "/" + ss_time.str() + string(".png"), vio_manager->img_rgb);
+
+      if (image_pose_output_en && fout_visual_pos.is_open())
+      {
+        Eigen::Quaterniond q(_state.rot_end);
+        fout_visual_pos << std::fixed << std::setprecision(6);
+        fout_visual_pos << LidarMeasures.measures.back().vio_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
+              << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+      }
       img_wait_num = 0;
     }
   }
