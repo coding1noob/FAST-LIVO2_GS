@@ -106,6 +106,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
   nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
   nh.param<int>("pcd_save/type", pcd_save_type, 0);
+  nh.param<bool>("pcd_save/middle_frame_fusion_en", middle_frame_fusion_en, false);
+  nh.param<int>("pcd_save/fusion_interval", fusion_interval, pcd_save_interval);
   nh.param<bool>("image_save/img_save_en", img_save_en, false);
   nh.param<int>("image_save/interval", img_save_interval, 1);
 
@@ -335,6 +337,9 @@ void LIVMapper::handleVIO()
   //   visual_sub_map->push_back(temp_map);
   // }
 
+  // The VIO event immediately follows its matching LIO event. Capture this
+  // image so a completed group can use its middle frame as the reference.
+  cacheFusionImage(LidarMeasures.measures.back().vio_time);
   publish_frame_world(pubLaserCloudFullRes, vio_manager);
   publish_img_rgb(pubImage, vio_manager);
 
@@ -453,6 +458,8 @@ void LIVMapper::handleLIO()
   }
   *pcl_w_wait_pub = *laserCloudWorld;
 
+  // Cache the LIO result before the following VIO event attaches its image.
+  cacheFusionScan(LidarMeasures.measures.back().lio_time);
   publish_frame_world(pubLaserCloudFullRes, vio_manager);
   if (pub_effect_point_en) publish_effect_world(pubLaserCloudEffect, voxelmap_manager->ptpl_list_);
   if (voxelmap_manager->config_setting_.is_pub_plane_map_) voxelmap_manager->pubVoxelMap();
@@ -492,8 +499,106 @@ void LIVMapper::handleLIO()
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
 }
 
-void LIVMapper::savePCD() 
+void LIVMapper::cacheFusionScan(double timestamp)
 {
+  if (!middle_frame_fusion_en || pcd_save_type != 1 ||
+      !feats_undistort || feats_undistort->empty()) return;
+
+  FusionFrame frame;
+  frame.timestamp = timestamp;
+  frame.cloud.reset(new PointCloudXYZI());
+  frame.cloud->reserve(feats_undistort->size());
+  for (const auto &point : feats_undistort->points)
+  {
+    PointType body_point;
+    RGBpointBodyLidarToIMU(&point, &body_point);
+    frame.cloud->push_back(body_point);
+  }
+  frame.rot_world_body = _state.rot_end;
+  frame.pos_world_body = _state.pos_end;
+  fusion_frames.push_back(frame);
+}
+
+void LIVMapper::cacheFusionImage(double timestamp)
+{
+  if (!middle_frame_fusion_en || fusion_frames.empty() || !img_save_en) return;
+
+  // LIVO always emits the LIO event immediately before its matching VIO event.
+  // Attach this image to that cached scan so the middle image is selected later.
+  FusionFrame &frame = fusion_frames.back();
+  frame.timestamp = timestamp;
+  frame.rot_world_body = _state.rot_end;
+  frame.pos_world_body = _state.pos_end;
+  frame.image = vio_manager->img_rgb.clone();
+
+  if (fusion_interval > 0 && static_cast<int>(fusion_frames.size()) >= fusion_interval)
+    writeMiddleFrameFusion();
+}
+
+void LIVMapper::writeMiddleFrameFusion()
+{
+  if (fusion_frames.empty()) return;
+
+  const size_t reference_index = fusion_frames.size() / 2;
+  const FusionFrame &reference = fusion_frames[reference_index];
+  PointCloudXYZI fused;
+  size_t point_count = 0;
+  for (const FusionFrame &frame : fusion_frames) point_count += frame.cloud->size();
+  fused.reserve(point_count);
+
+  // Convert each scan from its own IMU-body frame to world, then into the
+  // middle scan's IMU-body frame: p_ref = R_ref^T (p_world - t_ref).
+  for (const FusionFrame &frame : fusion_frames)
+  {
+    const M3D relative_rotation = reference.rot_world_body.transpose() * frame.rot_world_body;
+    const V3D relative_translation = reference.rot_world_body.transpose() *
+                                     (frame.pos_world_body - reference.pos_world_body);
+    for (const PointType &point : frame.cloud->points)
+    {
+      const V3D transformed = relative_rotation * V3D(point.x, point.y, point.z) +
+                              relative_translation;
+      PointType output = point;
+      output.x = transformed.x();
+      output.y = transformed.y();
+      output.z = transformed.z();
+      fused.push_back(output);
+    }
+  }
+
+  if (fused.empty() || reference.image.empty())
+  {
+    ROS_WARN("Skipping empty middle-frame fusion batch");
+    fusion_frames.clear();
+    return;
+  }
+
+  std::stringstream name;
+  name << std::fixed << std::setprecision(6) << reference.timestamp;
+  const std::string pcd_path = pcd_output_dir + "/" + name.str() + ".pcd";
+  const std::string image_path = image_output_dir + "/" + name.str() + ".png";
+  pcl::PCDWriter writer;
+  if (writer.writeBinary(pcd_path, fused) != 0)
+    throw std::runtime_error("Failed to write fused PCD: " + pcd_path);
+  if (!cv::imwrite(image_path, reference.image))
+    throw std::runtime_error("Failed to write fused image: " + image_path);
+
+  std::cout << "Saved middle-frame fusion (" << fusion_frames.size()
+            << " scans) at " << name.str() << std::endl;
+  fusion_frames.clear();
+}
+
+void LIVMapper::savePCD()
+{
+  if (middle_frame_fusion_en)
+  {
+    // Do not silently emit a partial group with a fabricated reference image.
+    // A future explicit drain mode can decide how to handle such a group.
+    if (!fusion_frames.empty())
+      std::cout << "Discarding incomplete middle-frame fusion batch of "
+                << fusion_frames.size() << " frame(s)" << std::endl;
+    fusion_frames.clear();
+    return;
+  }
   if (pcd_save_en && (pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0) && pcd_save_interval < 0) 
   {
     std::string raw_points_dir = std::string(ROOT_DIR) + "Log/pcd/all_raw_points.pcd";
@@ -1212,7 +1317,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
   ss_time << std::fixed << std::setprecision(6) << update_time;
 
   // =================== Log/pcd 的 .pcd 保存导出 ===================
-  if (pcd_save_en)
+  if (pcd_save_en && !middle_frame_fusion_en)
   {
     static int scan_wait_num = 0;
 
@@ -1280,7 +1385,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
   // ====================================== 
   
   // =================== Log/image 的图片保存导出 ===================
-  if (img_save_en && LidarMeasures.lio_vio_flg == VIO)
+  if (img_save_en && !middle_frame_fusion_en && LidarMeasures.lio_vio_flg == VIO)
   {
     static int img_wait_num = 0;
     img_wait_num++;

@@ -43,6 +43,12 @@ def parse_args():
     parser.add_argument("--rate", type=float, default=1.0)
     parser.add_argument("--img-time-offset", type=float, default=0.0,
                         help="image timestamp offset applied by FAST-LIVO2 (seconds; default: 0)")
+    fusion_group = parser.add_mutually_exclusive_group()
+    fusion_group.add_argument("--middle-frame-fusion", dest="middle_frame_fusion", action="store_true",
+                              help="align interval scans to the middle scan before writing (default)")
+    fusion_group.add_argument("--no-middle-frame-fusion", dest="middle_frame_fusion", action="store_false",
+                              help="write the legacy interval accumulation without odometry alignment")
+    parser.set_defaults(middle_frame_fusion=True)
     parser.add_argument("--overwrite", action="store_true",
                         help="allow replacing an existing output directory")
     return parser.parse_args()
@@ -142,6 +148,9 @@ def parse_metadata(config_path, camera_path, args, root):
         "extraction": {
             "image_interval": args.interval, "pcd_interval": args.interval,
             "pcd_frame": frame, "no_extrinsic": False,
+            "multi_scan_fusion": args.middle_frame_fusion and args.interval > 1,
+            "fusion_reference": "middle_scan" if args.middle_frame_fusion else "latest_scan",
+            "fusion_interval": args.interval,
             "images_resized": scale != 1.0,
             "pipeline": "FAST-LIVO2 LIVO; IMU point-time undistortion and LIO odometry",
         },
@@ -165,7 +174,10 @@ def parse_metadata(config_path, camera_path, args, root):
         "projection": {"point_radius": 2, "color_by": "depth", "max_points": 200000},
         "provenance": {
             "pcd": "FAST-LIVO2 ImuProcess::UndistortPcl output, saved in IMU body frame",
-            "odometry": "FAST-LIVO2 LIO state used during processing",
+            "fusion": ("For interval > 1, scans are odometry-aligned to the middle scan body frame; the middle VIO image is saved"
+                        if args.middle_frame_fusion else
+                        "Legacy interval accumulation: scans are concatenated in their individual body frames"),
+            "odometry": "FAST-LIVO2 LIO state used during processing and multi-scan alignment",
             "image": "FAST-LIVO2 VIO color frame (camera-model scaled resolution)",
             "poses_written": False,
             "dataset_root": str(root),
@@ -201,6 +213,8 @@ def launch_text(args, image_dir, pcd_dir):
   <param name="pcd_save/pcd_save_en" value="true" />
   <param name="pcd_save/interval" value="{interval}" />
   <param name="pcd_save/type" value="1" />
+  <param name="pcd_save/middle_frame_fusion_en" value="{middle_frame_fusion}" />
+  <param name="pcd_save/fusion_interval" value="{interval}" />
   <param name="pcd_save/colmap_output_en" value="false" />
   <param name="image_save/img_save_en" value="true" />
   <param name="image_save/interval" value="{interval}" />
@@ -215,6 +229,7 @@ def launch_text(args, image_dir, pcd_dir):
 """.format(config=str(args.config.resolve()), camera_config=str(args.camera_config.resolve()),
            lidar_topic=args.lidar_topic, imu_topic=args.imu_topic, raw_topic=args.raw_image_topic,
            img_time_offset=args.img_time_offset, interval=args.interval,
+           middle_frame_fusion=str(args.middle_frame_fusion).lower(),
            image_dir=str(image_dir), pcd_dir=str(pcd_dir), republish=republish)
 
 

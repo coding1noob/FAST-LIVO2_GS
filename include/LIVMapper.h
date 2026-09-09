@@ -37,6 +37,9 @@ public:
   void handleLIO();
   void savePCD();
   void processImu();
+  void cacheFusionImage(double timestamp);
+  void cacheFusionScan(double timestamp);
+  void writeMiddleFrameFusion();
   
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
@@ -185,5 +188,19 @@ public:
   double aver_time_icp = 0;
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
+
+  // Each cached scan is already IMU-undistorted and expressed in that scan's
+  // IMU body frame. The pose is the body-to-world transform at that time.
+  struct FusionFrame
+  {
+    double timestamp = 0.0;
+    PointCloudXYZI::Ptr cloud;
+    M3D rot_world_body = M3D::Identity();
+    V3D pos_world_body = V3D::Zero();
+    cv::Mat image;
+  };
+  deque<FusionFrame> fusion_frames;
+  int fusion_interval = 1;
+  bool middle_frame_fusion_en = false;
 };
 #endif
